@@ -5,8 +5,8 @@
 \documentclass{wg21}
 
 \title{Ordering of constraints involving fold expressions}
-\docnumber{P2963R1}
-\audience{EWG}
+\docnumber{P2963R3}
+\audience{EWG, CWG}
 \author{Corentin Jabot}{corentin.jabot@gmail.com}
 \usepackage[dvipsnames]{xcolor}
 
@@ -21,11 +21,29 @@ We propose rules for the normalization and ordering of fold expressions over \tc
 
 \section{Revisions}
 
+\subsection{R3}
+
+\begin{itemize}
+\item Wording improvements following CWG review in St Louis.
+\item Protect from empty packs inconsistencies
+by requiring that both constraints involve equivalent template parameters (which ensure they have the same size)
+\item Add an Annex C entry, as the decomposing of the fold expanded
+constraint might cause some atomic constraint to have non-bool types.
+\end{itemize}
+\subsection{R2}
+
+\begin{itemize}
+\item Wording improvements following CWG review in Tokyio. Notably, we added a description of how satisfaction is established.
+\item Clarify that subsumption checking short-circuits. Add a design discussion.
+\item A fold expression constraint can now only subsume another if they both have the same fold operator. This avoid inconsistent subsumption and checking results in the presence of empty packs.
+\end{itemize}
+
+
 \subsection{R1}
 
 \begin{itemize}
-\item Wording improvements: The previous version of this paper incorrectly looked at the size of the packs involved in the fold expressions.
-This was unnecessary and was removed. The current design does not look at the template argument/parameter mapping to establish subsumption of fold expressions.
+\item Wording improvements: The previous version of this paper incorrectly looked at the size of the packs involved in the fold expressions (as it forced partial ordering to look at template arguments).
+The current design does not look at the template argument/parameter mapping to establish subsumption of fold expressions.
 \item A complete implementation of this proposal is available on Compiler Explorer. The implementation section was expanded.
 \item Add an additional example.
 \end{itemize}
@@ -125,6 +143,91 @@ to establish subsumption.
 An implementation does need to track whether an atomic constraint that contains an unexpanded pack was originally part of a and/or fold expression to properly
 implement the subsumption rules (\tcode{\&\&} subsumes \tcode{||} \& \tcode{\&\&} and \tcode{||} subsumes \tcode{||}).
 
+\subsection{Subsection with mixed fold operators}
+
+\subsubsection{The Kona example}
+Consider this example provided by Hubert Tong
+
+\begin{colorblock}
+template <typename ...T> struct Tuple { };
+template <typename T> concept P = true;
+
+template <typename T, typename U, typename V, typename X> struct A;
+
+
+template <typename ...T, typename ...U, typename V, typename X>
+requires P<X> || ((P<V> || P<U>) || ...)         // #A
+void foo(A<Tuple<T ...>, Tuple<U ...>, V, X> *); // #1
+
+template <typename ...T, typename ...U, typename V, typename X>
+requires P<X> || ((P<V> && P<T>) && ...)         // #B
+void foo(A<Tuple<T ...>, Tuple<U ...>, V, X> *); // #2
+
+
+void bar(A<Tuple<int>, Tuple<>, int, int> *p) { foo(p); }
+\end{colorblock}
+
+In this example, under the rule proposed in R1, of this paper, \#A subsumed \#B, and so \#1 would have been be a better choice.
+However here, \tcode{U} is empty. So A's constraints are equivalent to just \tcode{P<X>} which make B more constrained.
+
+%To avoid inconsistencies between constraint checking and subsumption, a fold expression can only subsume another if they both have the same fold operator
+%(they are both folding over \tcode{\&\&} or they are both folding over \tcode{||}).
+
+\subsubsection{The Saint Louis Example}
+
+\begin{colorblock}
+struct Magic;
+template <typename ...V> struct A;
+template <typename, auto V> constexpr auto VTmpl = V;
+template <auto V> constexpr auto VTmpl<Magic, V> = !V;
+template <typename T> concept CF = VTmpl<T, false>;
+template <typename T> concept CT = VTmpl<T, true>;
+
+template <typename ...T, typename ...U, typename V>
+struct X *f(A<V, T ...> *, A<V, U ...> *) requires ((CF<V> || CT<T>) && ...);
+
+template <typename ...T, typename ...U, typename V>
+struct Y *f(A<V, T ...> *, A<V, U ...> *) requires ((CF<V> && CF<U>) && ...);
+
+void g(A<void, int> *a1p, A<void> *a2p, A<void, Magic> *amp) {
+	Y *p;
+	p = f(a1p, a2p);
+	p = f(amp, a2p);
+}
+\end{colorblock}
+
+In this example both fold operators are the same but because \tcode{U} is empty,
+the second overload's constraints are not satisfied even though subsumption finds it
+more specialized.
+
+In a previous version of this paper, we disallowed mixed-operators subsumption.
+However this does not resolves that second example.
+
+Instead, in addition, we propose to limit subsumption to cases involving an equivalent pack.
+That way, even though we don't know whether the pack expansion would be empty,
+both constraints will have the same number of expansions such that
+subsumption and satisfaction would give consistent results.
+
+We do not reintroduced mixed-operators subsumption, because given
+\begin{colorblock}
+template <typename... T>
+void f() requires (C<T> || ...); // #1
+template <typename... T>
+void f() requires (C<T> && ... ); // #2
+
+f();
+\end{colorblock}
+
+In this example, \#2 is more constrained than \#1, and satisfaction would be true for \#1 and not for \#2.
+Which is consistent. However \tcode{true} does not imply \tcode{false}, and to preserve the idea that
+subsumption forms an implication relationship, we do not restore mixed-operators subsumption.
+
+
+\subsection{Short circuiting}
+
+To be consistent with conjunction constraint and disjection constraints, we propose that fold expanded constrait short circuit (both their evaluation and substitution).
+
+
 
 \subsection{What this paper is not}
 
@@ -138,6 +241,68 @@ and transform \tcode{(... \&\& A)} into \tcode{(A \&\& ...)} as they are semanti
 We then are left with either \tcode{(A \&\& ...)} or \tcode{(A || ...)}, and for packs of the same size, the rules of subsumptions are the same as for that of atomic constraints.
 
 \section{Wording}
+
+\rSec2[temp.constr.constr]{Constraints}
+
+\rSec3[temp.constr.constr.general]{General}
+
+\indextext{satisfy|see{constraint, satisfaction}}%
+
+\pnum
+A \defn{constraint} is a sequence of logical operations and
+operands that specifies requirements on template arguments.
+The operands of a logical operation are constraints.
+There are \changed{three}{four} different kinds of constraints:
+\begin{itemize}
+    \item conjunctions \iref{temp.constr.op},
+    \item disjunctions \iref{temp.constr.op}, \removed{and}
+    \item atomic constraints \iref{temp.constr.atomic}\added{, and}
+\begin{addedblock}
+    \item fold expanded constraints [temp.constr.fold].
+\end{addedblock}
+\end{itemize}
+
+\pnum
+In order for a constrained template to be instantiated \iref{temp.spec},
+its associated constraints \iref{temp.constr.decl}
+shall be satisfied as described in the following subclauses.
+\begin{note}
+    Forming the name of a specialization of
+    a class template,
+    a variable template, or
+    an alias template \iref{temp.names}
+    requires the satisfaction of its constraints.
+    Overload resolution \iref{over.match.viable}
+    requires the satisfaction of constraints
+    on functions and function templates.
+\end{note}
+
+\ednote{Add after [temp.constr.atomic]}
+
+\begin{addedblock}
+\rSec3[temp.constr.fold]{Fold expanded constraint}
+
+A \defn{fold expanded constraint} is formed from a constraint $C$, and a \defn{fold-operator} which can either be \tcode{\&\&} or \tcode{||}.
+
+% A fold expanded constraint whose \defn{fold-operator} is \tcode{\&\&} is a \defn{fold expanded conjunction constraint}.
+
+% A fold expanded constraint whose \defn{fold-operator} is \tcode{||} is a \defn{fold expanded disjunction constraint}.
+
+A fold expanded constraint is a pack expansion [temp.variadic]. Let $N$ be the number of elements in the pack expansion parameters [temp.variadic].
+
+A fold expanded constraint whose \grammarterm{fold-operator} is \tcode{\&\&} is satisfied if it is a valid pack expansion and if $N = 0$ or if for each $i$ where $0 \le i < N$ in increasing order, $C$ is satisfied when replacing each pack expansion parameter with the corresponding $i$th element. No substitution takes place for any $i$ greater than the smallest $i$ for which the constraint is not satisfied.
+
+A fold expanded constraint whose \grammarterm{fold-operator} is \tcode{||} is satisfied if it is a valid pack expansion, $N > 0$, and if for $i$ where $0 \le i < N$ in increasing order, there is a smallest $i$ for which $C$ is satisfied when replacing each pack expansion parameter with the corresponding $i$th element. No substitution takes place for any $i$ greater than the smallest $i$ for which the constraint is satisfied.
+
+\begin{note}
+If the pack expansion expands packs of different size, then it is invalid and the fold expanded constraint is not satisfied.
+\end{note}
+
+Two fold expanded constraints are \defn{compatible for subsumption} if
+their respective constraints both contain an equivalent unexpanded pack [temp.over.link].
+\end{addedblock}
+
+\textcolor{noteclr}{[...]}
 
 \rSec2[temp.constr.normal]{Constraint normalization}
 \indextext{constraint!normalization|(}%
@@ -189,16 +354,15 @@ in the parameter mapping.
 \end{example}
 
 \begin{addedblock}
-\item For a \grammarterm{fold-operator}  [expr.prim.fold] that is either \tcode{\&\&} or \tcode{||}, the normal form of an expression \tcode{( ... \grammarterm{fold-operator} E )} is \tcode{( E \grammarterm{fold-operator}...)}.
-\item The normal form of an expression \tcode{( E1 \&\& ... \&\& E2 )} or \tcode{( E2 \&\& ... \&\& E1 )} where \tcode{E1} contains an unexpanded pack is the conjunction of
-the normal forms of \tcode{E2} and \tcode{(E1 \&\&...)}.
-
-\ednote{With \paper{P2841}, we want to treat fold expression differently when the pattern of the fold expression denotes a concept template parameter.}
-
-\item The normal form of an expression \tcode{( E1 || ... || E2 )} or \tcode{( E2 || ... || E1 )} where \tcode{E1} is an unexpanded pack is the disjunction of
-the normal forms of \tcode{E2} and \tcode{(E1 || ...)}.
-
-\item In an expression of the form \tcode{(E \emph{op} ...)} where \emph{op} is \tcode{||} or \tcode{\&\&}, \tcode{E} is replaced by its normal form.
+\item For a \grammarterm{fold-operator}  [expr.prim.fold] that is either \tcode{\&\&} or \tcode{||}, the normal form of an expression \tcode{( ... \grammarterm{fold-operator} E )} is the normal form of \tcode{( E \grammarterm{fold-operator}...)}.
+\item  For a \grammarterm{fold-operator}  that is either \tcode{\&\&} or \tcode{||}, the normal form of an expression \tcode{( E1 \grammarterm{fold-operator}  ... \grammarterm{fold-operator}  E2 )} is the the normal form of
+\begin{itemize}
+    \item \tcode{(E1 \grammarterm{fold-operator}...) \grammarterm{fold-operator}  E2} if \tcode{E1} contains an unexpanded pack, or
+    \item \tcode{E1 \grammarterm{fold-operator} (E2 \grammarterm{fold-operator}...)} otherwise.
+\end{itemize}
+\item The normal form of \tcode{(E \&\& ...)} is a fold expanded
+constraint \mbox{[temp.constr.fold]} whose constraint is the normal form of \tcode{E} and whose  \grammarterm{fold-operator} is \tcode{\&\&}.
+\item The normal form of \tcode{(E || ...)} is a fold expanded constraint whose constraint is the normal form of \tcode{E} and whose  \grammarterm{fold-operator} is \tcode{||}.
 \end{addedblock}
 
 \item
@@ -207,7 +371,6 @@ the atomic constraint
 whose expression is \tcode{E} and
 whose parameter mapping is the identity mapping.
 \end{itemize}
-
 
 \rSec2[temp.constr.order]{Partial ordering by constraints}
 \indextext{subsume|see{constraint, subsumption}}
@@ -227,25 +390,28 @@ in the conjunctive normal form of $Q$, where
     an atomic constraint $Q_{jb}$ in $Q_j$ such that $P_{ia}$ subsumes $Q_{jb}$, and
 
     \item an atomic constraint $A$ subsumes another atomic constraint
-    $B$ if \changed{and only if $A$ and $B$ are identical using the
-    rules described in [temp.constr.atomic].}{:}
-    \begin{addedblock}
-        \begin{itemize}
-        \item $A$ is a \grammarterm{fold-expression} of the form \tcode{($P$ \&\&...)},
-        $B$ is a \grammarterm{fold-expression} of the form \tcode{($Q$ \&\&...)} or \tcode{($Q$ || ...)}
-        %and let $P'$ be the \grammarterm{template-argument} corresponding to the unexpanded pack contained in $P$ in the parameter mapping of $A$, and let $Q'$ be the \grammarterm{template-argument} corresponding to the unexpanded pack contained in $Q$ in the parameter mapping of $B$, \tcode{sizeof...($P'$) == sizeof...($Q'$)} is \tcode{true}
-        and $P$ subsumes $Q$.
+    $B$ if and only if $A$ and $B$ are identical using the
+    rules described in [temp.constr.atomic].
 
-        \item Otherwise, $A$ is a \grammarterm{fold-expression} of the form \tcode{($P$ ||...)} or \tcode{($P$ \&\&...)}
-        and $B$ is a \grammarterm{fold-expression} of the form \tcode{($Q$   ||...)}
-        % and let $P'$ be the \grammarterm{template-argument} corresponding to the unexpanded pack contained in $P$ in the parameter mapping of $A$, and let $Q'$ be the \grammarterm{template-argument} corresponding to the unexpanded pack contained in $Q$ in the parameter mapping of $B$, \tcode{sizeof...($P'$) == sizeof...($Q'$)} is \tcode{true},
-        and $P$ subsumes $Q$.
-
-        \item Otherwise, $A$ and $B$ are identical using the rules described in [temp.constr.atomic].
-        \end{itemize}
+   \begin{addedblock}
+    \item a fold expanded constraint $A$  subsumes another fold expanded constraint
+    $B$ if they are compatible for subsumption,
+    have the same \grammarterm{fold-operator},
+    and the constraint of $A$ subsumes that of $B$.
+    %% , and
+%    \begin{itemize}
+%    	\item the \grammarterm{fold-operator} of $A$ is \tcode{\&\&} or
+%    	\item the \grammarterm{fold-operator} of $B$ is \tcode{||}.
+%    \end{itemize}
     \end{addedblock}
 \end{itemize}
 %
+% A is a fold-expression of the form (P &&...), B is a fold-expression of the form (Q
+% &&...) or (Q || ...) and P subsumes Q.
+% – Otherwise, A is a fold-expression of the form (P ||...) or (P &&...) and B is a
+% fold-expression of the form (Q ||...) and P subsumes Q.
+%
+
 \begin{example}
     Let $A$ and $B$ be atomic constraints [temp.constr.atomic].
     %
@@ -257,11 +423,139 @@ in the conjunctive normal form of $Q$, where
 \end{example}
 
 
+
+\rSec2[temp.variadic]{Variadic templates}
+
+\begin{itemize}
+	\item In a \grammarterm{fold-expression}\iref{expr.prim.fold};
+	the pattern is the \grammarterm{cast-expression}
+	that contains an unexpanded pack.
+
+\begin{addedblock}
+	\item In a fold expanded constraint \iref{temp.constr.fold};
+	the pattern is the constraint of that fold expanded constraint.
+\end{addedblock}
+
+\end{itemize}
+
+\textcolor{noteclr}{[...]}
+
+\ednote{Insert after [temp.variadic]/p13}
+
+\pnum
+The instantiation of a \grammarterm{fold-expression}\iref{expr.prim.fold} produces:
+\begin{itemize}
+	\item
+	% Note: "\space" used below because " " inside tcode adds too much whitespace;
+	% one could optionally use mathfont inside tcode, e.g., "\tcode{($ $}".
+	\tcode{(}\space
+	\tcode{((}$\mathtt{E}_1$
+	\placeholder{op} $\mathtt{E}_2$\tcode{)}
+	\placeholder{op} $\cdots$\tcode{)}
+	\placeholder{op} $\mathtt{E}_N$
+	\space\tcode{)}
+	for a unary left fold,
+	\item
+	\tcode{(}\space
+	$\mathtt{E}_1$     \placeholder{op}
+	\tcode{(}$\cdots$           \placeholder{op}
+	\tcode{(}$\mathtt{E}_{N-1}$ \placeholder{op}
+	$\mathtt{E}_N$\tcode{))}
+	\space\tcode{)}
+	for a unary right fold,
+	\item
+	\tcode{(}\space
+	\tcode{(((}$\mathtt{E}$
+	\placeholder{op} $\mathtt{E}_1$\tcode{)}
+	\placeholder{op} $\mathtt{E}_2$\tcode{)}
+	\placeholder{op} $\cdots$\tcode{)}
+	\placeholder{op} $\mathtt{E}_N$
+	\space\tcode{)}
+	for a binary left fold, and
+	\item
+	\tcode{(}\space
+	$\mathtt{E}_1$     \placeholder{op}
+	\tcode{(}$\cdots$           \placeholder{op}
+	\tcode{(}$\mathtt{E}_{N-1}$ \placeholder{op}
+	\tcode{(}$\mathtt{E}_{N}$   \placeholder{op}
+	$\mathtt{E}$\tcode{)))}
+	\space\tcode{)}
+	for a binary right fold.
+\end{itemize}
+
+In each case,
+\placeholder{op} is the \grammarterm{fold-operator}.
+For a binary fold,
+$\mathtt{E}$ is generated
+by instantiating the \grammarterm{cast-expression}
+that did not contain an unexpanded pack.
+\begin{example}
+	\begin{codeblock}
+		template<typename ...Args>
+		bool all(Args ...args) { return (... && args); }
+
+		bool b = all(true, true, true, false);
+	\end{codeblock}
+	Within the instantiation of \tcode{all},
+	the returned expression expands to
+	\tcode{((true \&\& true) \&\& true) \&\& false},
+	which evaluates to \tcode{false}.
+\end{example}
+If $N$ is zero for a unary fold,
+the value of the expression is shown in \tref{temp.fold.empty};
+if the operator is not listed in \tref{temp.fold.empty},
+the instantiation is ill-formed.
+
+\begin{floattable}{Value of folding empty sequences}{temp.fold.empty}
+	{ll}
+	\topline
+	\lhdr{Operator} & \rhdr{Value when pack is empty} \\
+	\capsep
+	\tcode{\&\&}    & \tcode{true}   \\
+	\tcode{||}      & \tcode{false}  \\
+	\tcode{,}       & \tcode{void()} \\
+\end{floattable}
+
+
+\begin{addedblock}
+A fold expanded constraint is not instantiated [temp.constr.fold].
+\end{addedblock}
+
+\textcolor{noteclr}{[...]}
+
+\ednote{Insert in Annex C after [diff.cpp23.dcl.dcl]}
+% \rSec2[diff.cpp23.dcl.dcl]{\ref{dcl.dcl}: Declarations}
+
+\begin{addedblock}
+ \rSec2[diff.cpp23.temp.constr]{ {[temp.constr]}: Template constraints}
+\change
+Some atomic constraints become fold expanded constraints.
+\rationale
+Permit the subsumption of fold expressions
+\effect
+Valid C++23 code may become ill-formed.
+For example:
+\begin{codeblock}
+template <typename ...V> struct A;
+struct Thingy {
+	static constexpr int compare(const Thingy&) {return 1;}
+};
+
+template <typename ...T, typename ...U>
+void f(A<T ...> *, A<U ...> *)
+requires (T::compare(U{}) && ...);  // was well-formed (atomic constraint of type bool),
+                          // now ill-formed (results in an atomic constraint of type int)
+void g(A<Thingy, Thingy> *ap) {
+	f(ap, ap);
+}
+\end{codeblock}
+\end{addedblock}
+
 \section{Acknowledgments}
 
 Thanks to Robert Haberlach for creating the original  \href{http://cplusplus.github.io/concepts-ts/ts-active.html#28}{Concept TS issue}.
 
-Thanks to Jens Mauer and Barry Revzin for their input on the wording.
+Thanks to Hubert Tong, Jens Mauer and Barry Revzin for their input on the wording.
 
 \bibliographystyle{plain}
 \bibliography{wg21}
